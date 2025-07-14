@@ -9,7 +9,7 @@ use std::{
 
 use chrono::Local;
 
-use crate::file::{LogioFile, MB};
+use crate::file::LogioFile;
 
 static LOGGER: OnceLock<Logger> = OnceLock::new();
 static INTERNAL_WRITER: SharedLogBuf = Mutex::new(NewInternalLog::None);
