@@ -2,14 +2,14 @@ pub mod file;
 pub mod macros;
 
 use std::{
-    io::{BufReader, Read},
+    io::{BufRead, BufReader, Read},
     sync::{Arc, Mutex, OnceLock},
     thread::{self, JoinHandle},
 };
 
 use chrono::Local;
 
-use crate::file::LogioFile;
+use crate::file::{LogioFile, MB};
 
 static LOGGER: OnceLock<Logger> = OnceLock::new();
 static INTERNAL_WRITER: SharedLogBuf = Mutex::new(NewInternalLog::None);
@@ -60,6 +60,16 @@ impl Logger {
         self
     }
 
+    pub fn input_bufs(&self, mut bufs: Vec<BufReader<LogBuffer>>) {
+        let mut pool = self.input_buf_pool.lock().unwrap();
+        pool.append(&mut bufs);
+        drop(pool);
+    }
+
+    fn clear_buf_pool(&self) {
+        *self.input_buf_pool.lock().unwrap() = Vec::new();
+    }
+
     pub fn log_file(mut self, file: LogioFile) -> Self {
         self.file = Some(Arc::new(Mutex::new(file)));
         self
@@ -83,34 +93,41 @@ impl Logger {
                     let mut killed = false;
                     loop {
                         let mut file_lock = file.lock().unwrap();
+                        //println!("loop1");
                         let mut pool = input_pool.lock().unwrap();
-                        for buf in pool.iter_mut() {
-                            let mut line = String::new();
-                            match buf.read_to_string(&mut line) {
+                        //println!("loop2");
+                        for buffer in pool.iter_mut() {
+                            let mut text = String::new();
+                            match buffer.read_line(&mut text) {
                                 Ok(n) if n > 0 => {
-                                    LogioFile::write_all(&mut file_lock, line.as_bytes());
+                                    //let text = String::from_utf8_lossy(&buf[..n]);
+                                    print!("{text}");
+                                    LogioFile::write_all(&mut file_lock, text.as_bytes());
                                     LogioFile::flush(&mut file_lock);
                                 }
                                 _ => {} // No data or EOF
                             }
+                            //println!("loop3");
                         }
 
                         let mut lock = INTERNAL_WRITER.lock().unwrap();
                         if let NewInternalLog::New(log) = lock.clone() {
                             lock.reset();
-                            println!("{:?}", lock.clone());
                             LogioFile::write_all(&mut file_lock, log.as_bytes());
                             LogioFile::flush(&mut file_lock);
                         }
                         // for some reason rust will not drop the lock variable from memory after
                         // the loop block so need to do it manually
                         drop(lock);
+                        drop(file_lock);
+                        drop(pool);
 
                         if *KILLED.lock().unwrap() {
                             killed = false;
                         } else if killed {
                             break;
                         }
+                        //println!("loop");
                         std::thread::sleep(std::time::Duration::from_millis(100));
                     }
                 })
@@ -137,6 +154,7 @@ pub fn with_logger(log: String, log_type: LogType) {
         log
     };
     *lock = NewInternalLog::New(log);
+    drop(lock);
 }
 
 pub fn kill() {
@@ -145,9 +163,16 @@ pub fn kill() {
 }
 
 pub fn init(logger: Logger) {
-    if LOGGER.set(logger).is_err() {
-        panic!("Logger cannot be set more than once")
+    if LOGGER.set(logger).is_ok() {
+        return;
     }
+    panic!("Logger cannot be set more than once")
+}
+
+pub fn new_input_bufs(bufs: Vec<BufReader<LogBuffer>>) {
+    let logger = LOGGER.get().expect("No logger initialized");
+    logger.clear_buf_pool();
+    logger.input_bufs(bufs);
 }
 
 pub enum LogType {
@@ -179,7 +204,6 @@ pub fn convert_log(log_type: LogType, msg: &str) -> String {
         .lines()
         .map(|line| format!("{}{} {}", log_time(), prefix, line))
         .collect();
-    println!("{msg}");
     msg
 }
 

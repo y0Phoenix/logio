@@ -11,10 +11,10 @@ use crate::err;
 use crate::info;
 use crate::warn;
 
-const MB: usize = 1024 * 1024;
+pub const MB: usize = 1024 * 1024;
 // const GB: usize = 1024 * 1000000;
 // 1GB max file size
-const MAX_FILE_SIZE: usize = 1000000000;
+pub const MAX_FILE_SIZE: usize = 1000000000;
 
 #[derive(Debug, Default)]
 pub struct Directory(pub &'static str);
@@ -134,7 +134,6 @@ impl LogioFile {
         let formatted_path = format!("logs/archives/log {sys_time}");
 
         // new archive file creation
-        println!("{file_path}");
         if let Ok(mut old_log_file) = File::options().read(true).open(&file_path) {
             let mut new_log_file = File::create(formatted_path)
                 .expect("FS Error: Failed To Create New Archive Log File");
