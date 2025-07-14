@@ -124,6 +124,7 @@ impl Logger {
 
                         if *KILLED.lock().unwrap() {
                             killed = false;
+                            info!("kill recieved");
                         } else if killed {
                             break;
                         }
