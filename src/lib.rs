@@ -1,19 +1,19 @@
+pub mod file;
 pub mod macros;
 
 use std::{
-    fs::File,
-    io::{BufReader, Read, Write},
+    io::{BufReader, Read},
     sync::{Arc, Mutex, OnceLock},
     thread::{self, JoinHandle},
 };
 
 use chrono::Local;
 
-pub static LOGGER: OnceLock<Logger> = OnceLock::new();
-pub static INTERNAL_WRITER: SharedLogBuf = Mutex::new(NewInternalLog::None);
-pub static KILLED: Mutex<bool> = Mutex::new(false);
+use crate::file::LogioFile;
 
-pub type LogBuffer = Box<dyn Read + Send + 'static>;
+static LOGGER: OnceLock<Logger> = OnceLock::new();
+static INTERNAL_WRITER: SharedLogBuf = Mutex::new(NewInternalLog::None);
+static KILLED: Mutex<bool> = Mutex::new(false);
 
 #[derive(Debug, Clone, Default)]
 pub enum NewInternalLog {
@@ -35,20 +35,11 @@ impl NewInternalLog {
 }
 
 type SharedLogBuf = Mutex<NewInternalLog>;
-
-#[derive(Debug, Clone)]
-pub struct LogFile(pub &'static str);
-
-impl Default for LogFile {
-    fn default() -> Self {
-        LogFile("log.txt")
-    }
-}
-
+pub type LogBuffer = Box<dyn Read + Send + 'static>;
 pub type LogErr = String;
 
 pub struct Logger {
-    file: Option<LogFile>,
+    file: Option<Arc<Mutex<LogioFile>>>,
     logger_thread: Option<JoinHandle<()>>,
     input_buf_pool: Arc<Mutex<Vec<BufReader<LogBuffer>>>>,
 }
@@ -56,7 +47,7 @@ pub struct Logger {
 impl Logger {
     pub fn new() -> Self {
         Self {
-            file: Some(LogFile::default()),
+            file: Some(Arc::new(Mutex::new(LogioFile::default()))),
             logger_thread: None,
             input_buf_pool: Arc::new(Mutex::new(Vec::new())),
         }
@@ -69,13 +60,17 @@ impl Logger {
         self
     }
 
-    pub fn log_file(mut self, file: LogFile) -> Self {
-        self.file = Some(file);
+    pub fn log_file(mut self, file: LogioFile) -> Self {
+        self.file = Some(Arc::new(Mutex::new(file)));
         self
     }
 
     pub fn run(mut self) -> Self {
-        let file_location = self.file.clone().expect("No log file defined.").0;
+        let file = Arc::clone(
+            self.file
+                .as_mut()
+                .expect("No log file initialized yet. You must init a log file with log_file()"),
+        );
 
         let input_pool = Arc::clone(&self.input_buf_pool);
 
@@ -83,22 +78,18 @@ impl Logger {
             thread::Builder::new()
                 .name("logger_thread".to_string())
                 .spawn(move || {
-                    let mut file = File::options()
-                        .write(true)
-                        .truncate(true)
-                        .create(true)
-                        .open(file_location)
-                        .expect("Failed to open log file");
-
-                    println!("file opened");
+                    info!("logger thread started");
+                    // so we can go through the loop one more time after kill send
+                    let mut killed = false;
                     loop {
+                        let mut file_lock = file.lock().unwrap();
                         let mut pool = input_pool.lock().unwrap();
                         for buf in pool.iter_mut() {
                             let mut line = String::new();
                             match buf.read_to_string(&mut line) {
                                 Ok(n) if n > 0 => {
-                                    file.write_all(line.as_bytes()).unwrap();
-                                    file.flush().unwrap();
+                                    LogioFile::write_all(&mut file_lock, line.as_bytes());
+                                    LogioFile::flush(&mut file_lock);
                                 }
                                 _ => {} // No data or EOF
                             }
@@ -108,14 +99,16 @@ impl Logger {
                         if let NewInternalLog::New(log) = lock.clone() {
                             lock.reset();
                             println!("{:?}", lock.clone());
-                            file.write_all(log.as_bytes()).unwrap();
-                            file.flush().unwrap();
+                            LogioFile::write_all(&mut file_lock, log.as_bytes());
+                            LogioFile::flush(&mut file_lock);
                         }
                         // for some reason rust will not drop the lock variable from memory after
                         // the loop block so need to do it manually
                         drop(lock);
 
                         if *KILLED.lock().unwrap() {
+                            killed = false;
+                        } else if killed {
                             break;
                         }
                         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -134,13 +127,21 @@ impl Default for Logger {
 }
 
 pub fn with_logger(log: String, log_type: LogType) {
-    let log = convert_log(log_type, &log);
-    *INTERNAL_WRITER.lock().unwrap() = NewInternalLog::New(log);
+    let mut log = convert_log(log_type, &log);
+    println!("{log}");
+    log.push('\n');
+    let mut lock = INTERNAL_WRITER.lock().unwrap();
+    let log = if let NewInternalLog::New(internal_log) = lock.clone() {
+        format!("{internal_log}{log}")
+    } else {
+        log
+    };
+    *lock = NewInternalLog::New(log);
 }
 
 pub fn kill() {
     *KILLED.lock().unwrap() = true;
-    println!("sent kill");
+    info!("sent kill");
 }
 
 pub fn init(logger: Logger) {
